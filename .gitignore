@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+
+# Environment variables (VERY IMPORTANT)
+.env
+
+# Database
+*.db
+
+# Node / Frontend
+node_modules/
+.next/
+out/
+
+# OS files
+.DS_Store
+
+# Claude / local config
+.claude/settings.local.json
+
+# Logs
+*.log
+
+# Build
+dist/
+build/

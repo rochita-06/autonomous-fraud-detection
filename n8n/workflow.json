@@ -1,0 +1,373 @@
+{
+  "name": "Fraud Detection Pipeline",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## Fraud Detection Pipeline\n1. Webhook receives a transaction (POST /webhook/transaction)\n2. Code node applies cheap rule-based pre-filtering\n3. Low-risk -> recorded via backend /transactions\n4. Suspicious -> backend /investigate (LangGraph agent)\n5. fraud_score >= 0.8 -> alert branch (set SLACK_WEBHOOK_URL env on the n8n container, or replace with an Email node)\n\nBackend URL uses host.docker.internal so the container can reach the API running on your host.",
+        "height": 300,
+        "width": 420
+      },
+      "name": "Notes",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -20,
+        -320
+      ]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "transaction",
+        "responseMode": "onReceived",
+        "options": {}
+      },
+      "name": "Transaction Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -20,
+        0
+      ],
+      "webhookId": "fraud-transaction-webhook"
+    },
+    {
+      "parameters": {
+        "jsCode": "const tx = $json.body ?? $json;\nlet risk = 0;\nconst amount = Number(tx.amount || 0);\nif (amount > 1000) risk += 0.4;\nelse if (amount > 500) risk += 0.25;\nconst hour = tx.timestamp ? new Date(tx.timestamp).getHours() : null;\nif (hour !== null && (hour <= 5 || hour === 23)) risk += 0.2;\nif ([\"crypto_exchange\", \"gift_cards\"].includes(tx.merchant_category)) risk += 0.25;\nif (amount >= 500 && amount % 100 === 0) risk += 0.1;\nrisk = Math.min(risk, 1);\nreturn [{ json: { ...tx, prefilter_risk: risk } }];"
+      },
+      "name": "Pre-Filter Rules",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        200,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "number": [
+            {
+              "value1": "={{ $json.prefilter_risk }}",
+              "operation": "largerEqual",
+              "value2": 0.3
+            }
+          ]
+        }
+      },
+      "name": "Suspicious?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        420,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:8000/investigate",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json) }}",
+        "options": {},
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-API-Key",
+              "value": "={{ $env.FRAUD_API_KEY }}"
+            },
+            {
+              "name": "X-Webhook-Signature",
+              "value": "={{ $json.__signature }}"
+            }
+          ]
+        }
+      },
+      "name": "Agent Investigation",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        660,
+        -120
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:8000/transactions",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json) }}",
+        "options": {},
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-API-Key",
+              "value": "={{ $env.FRAUD_API_KEY }}"
+            },
+            {
+              "name": "X-Webhook-Signature",
+              "value": "={{ $json.__signature }}"
+            }
+          ]
+        }
+      },
+      "name": "Record Clean Transaction",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        660,
+        140
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "number": [
+            {
+              "value1": "={{ $json.fraud_score }}",
+              "operation": "largerEqual",
+              "value2": 0.8
+            }
+          ]
+        }
+      },
+      "name": "High Fraud Score?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        900,
+        -120
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const r = $json;\nconst text = [\n  `:rotating_light: *FRAUD ALERT* \u2014 ${r.tx_id}`,\n  `User: ${r.user_id} | Amount: $${r.amount}`,\n  `Score: ${r.fraud_score} (${r.confidence} confidence) \u2192 *${r.action?.toUpperCase()}*`,\n  '',\n  ...(r.reasons || []).map((x, i) => `${i + 1}. ${x}`),\n].join('\\n');\nreturn [{ json: { text, result: r } }];"
+      },
+      "name": "Format Alert",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1140,
+        -220
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SLACK_WEBHOOK_URL }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ text: $json.text }) }}",
+        "options": {}
+      },
+      "name": "Slack Alert",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1380,
+        -220
+      ],
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 1500
+    },
+    {
+      "parameters": {
+        "jsCode": "const crypto = require('crypto');\nconst secret = $env.FRAUD_WEBHOOK_SECRET || '';\nconst body = JSON.stringify($json);\nconst signature = secret\n  ? crypto.createHmac('sha256', secret).update(body).digest('hex')\n  : '';\nreturn [{ json: { ...$json, __signature: signature } }];"
+      },
+      "name": "Sign Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        420,
+        220
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "number": [
+            {
+              "value1": "={{ $json.fraud_score }}",
+              "operation": "largerEqual",
+              "value2": 0.5
+            }
+          ]
+        }
+      },
+      "name": "Medium Fraud Score?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        900,
+        60
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const r = $json;\nconst text = [\n  `:warning: *Review needed* \u2014 ${r.tx_id}`,\n  `User: ${r.user_id} | Amount: $${r.amount}`,\n  `Score: ${r.fraud_score} (${r.confidence} confidence) -> *${r.action?.toUpperCase()}*`,\n].join('\\n');\nreturn [{ json: { text, result: r } }];"
+      },
+      "name": "Format Review Notice",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1140,
+        60
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SLACK_WEBHOOK_URL }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ text: $json.text }) }}",
+        "options": {}
+      },
+      "name": "Slack Review Notice",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1380,
+        60
+      ],
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 1500
+    }
+  ],
+  "connections": {
+    "Transaction Webhook": {
+      "main": [
+        [
+          {
+            "node": "Pre-Filter Rules",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pre-Filter Rules": {
+      "main": [
+        [
+          {
+            "node": "Sign Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Suspicious?": {
+      "main": [
+        [
+          {
+            "node": "Agent Investigation",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Record Clean Transaction",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Agent Investigation": {
+      "main": [
+        [
+          {
+            "node": "High Fraud Score?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "High Fraud Score?": {
+      "main": [
+        [
+          {
+            "node": "Format Alert",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Medium Fraud Score?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Alert": {
+      "main": [
+        [
+          {
+            "node": "Slack Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sign Payload": {
+      "main": [
+        [
+          {
+            "node": "Suspicious?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Medium Fraud Score?": {
+      "main": [
+        [
+          {
+            "node": "Format Review Notice",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Format Review Notice": {
+      "main": [
+        [
+          {
+            "node": "Slack Review Notice",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {}
+}
